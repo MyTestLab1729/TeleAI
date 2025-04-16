@@ -3,9 +3,10 @@ import requests
 import time
 from datetime import datetime
 import re
+import os
 
 # ==== CONFIGURATION ====
-TELEGRAM_BOT_TOKEN = ''
+TELEGRAM_BOT_TOKEN = '7323819110:AAERJSFKN6dzWIXioeErIrHSkQ1WvaIAVts'
 GEMINI_API_KEY = ''
 STABILITY_API_KEY = ''
 
@@ -45,52 +46,71 @@ def send_long_message(chat_id, text):
     for i in range(0, len(text), MAX_MESSAGE_LENGTH):
         bot.send_message(chat_id, text[i:i + MAX_MESSAGE_LENGTH])
 
-# ==== GEMINI ====
-def ask_gemini(prompt):
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    try:
-        res = requests.post(GEMINI_URL, headers=HEADERS_GEMINI, json=payload)
-        res.raise_for_status()
-        raw_text = res.json()['candidates'][0]['content']['parts'][0]['text']
-        # Return the raw text without escaping to preserve Markdown formatting
-        return raw_text
-    except Exception as e:
-        # Escape only the error message to avoid breaking Markdown
-        return escape_markdown(f"❌ Gemini error: {str(e)}")
-
 # ==== STABILITY FUNCTIONS ====
-def generate_image(prompt):
+def generate_image(prompt, chat_id):
     url = "https://api.stability.ai/v2beta/stable-image/generate/ultra"
     headers = {
         "authorization": f"Bearer {STABILITY_API_KEY}",
         "accept": "image/*"
     }
     data = {"prompt": prompt, "output_format": "webp"}
+    file_path = f"{chat_id}_generated_image.webp"
     try:
         response = requests.post(url, headers=headers, files={"none": ''}, data=data)
         if response.status_code == 200:
-            with open("generated_image.webp", 'wb') as file:
+            with open(file_path, 'wb') as file:
                 file.write(response.content)
-            return "generated_image.webp"
+            return file_path
         return None
     except Exception as e:
         print("Image generation error:", e)
         return None
 
-def get_stability_credits():
-    url = "https://api.stability.ai/v1/user/balance"
-    headers = {"Authorization": f"Bearer {STABILITY_API_KEY}"}
-    try:
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            credits = response.json().get("credits", None)
-            return round(credits, 2) if credits is not None else "Unknown"
-        return None
-    except Exception as e:
-        print("Credit check error:", e)
-        return None
 
-def send_image_for_video(image_path):
+def get_user_stability_credits(chat_id):
+    file_name = f"{chat_id}_stabilityapis.txt"
+    if not os.path.exists(file_name):
+        return "No API keys found."
+
+    total_credits = 0
+    valid_keys = []
+
+    with open(file_name, "r") as file:
+        keys = file.readlines()
+
+    for key in keys:
+        key = key.strip()
+        if not key:
+            continue
+
+        url = "https://api.stability.ai/v1/user/balance"
+        headers = {"Authorization": f"Bearer {key}"}
+        try:
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                credits = response.json().get("credits", 0)
+                if credits > 5:
+                    total_credits += credits
+                    valid_keys.append(key)
+                else:
+                    print(f"API key {key} removed due to low credits ({credits}).")
+            else:
+                print(f"API key {key} is invalid or failed to fetch credits.")
+        except Exception as e:
+            print(f"Error checking API key {key}: {e}")
+
+    # Update the file with valid keys only
+    with open(file_name, "w") as file:
+        file.write("\n".join(valid_keys) + "\n")
+
+    # Set the first valid key as the STABILITY_API_KEY for this user
+    global STABILITY_API_KEY
+    STABILITY_API_KEY = valid_keys[0] if valid_keys else None
+
+    return total_credits if total_credits > 0 else "No valid API keys with sufficient credits."
+
+
+def send_image_for_video(image_path, chat_id):
     url = "https://api.stability.ai/v2beta/image-to-video"
     headers = {"authorization": f"Bearer {STABILITY_API_KEY}"}
     files = {"image": open(image_path, "rb")}
@@ -100,32 +120,118 @@ def send_image_for_video(image_path):
         return response.json().get("id")
     return None
 
+
 def get_video_result(generation_id, status_msg, chat_id):
     result_url = f"https://api.stability.ai/v2beta/image-to-video/result/{generation_id}"
     headers = {"authorization": f"Bearer {STABILITY_API_KEY}", "accept": "video/*"}
+    file_path = f"{chat_id}_output_video.mp4"
     for attempt in range(10):
         response = requests.get(result_url, headers=headers)
         if response.status_code == 202:
             bot.edit_message_text("⏳ Still generating...", chat_id, status_msg.message_id)
             time.sleep(6)
         elif response.status_code == 200:
-            with open("output_video.mp4", 'wb') as video_file:
+            with open(file_path, 'wb') as video_file:
                 video_file.write(response.content)
-            return "output_video.mp4"
+            return file_path
         else:
             break
     return None
 
-def generate_audio(prompt, duration):
+
+def generate_audio(prompt, duration, chat_id):
     url = "https://api.stability.ai/v2beta/audio/stable-audio-2/text-to-audio"
     headers = {"authorization": f"Bearer {STABILITY_API_KEY}", "accept": "audio/*"}
     data = {"prompt": prompt, "output_format": "mp3", "duration": duration, "steps": 30}
-    response = requests.post(url, headers=headers, files={"none": ''}, data=data)
-    if response.status_code == 200:
-        with open("generated_audio.mp3", 'wb') as file:
-            file.write(response.content)
-        return "generated_audio.mp3"
-    return None
+    file_path = f"{chat_id}_generated_audio.mp3"
+    try:
+        response = requests.post(url, headers=headers, files={"none": ''}, data=data)
+        if response.status_code == 200:
+            with open(file_path, 'wb') as file:
+                file.write(response.content)
+            return file_path
+        return None
+    except Exception as e:
+        print("Audio generation error:", e)
+        return None
+
+
+@bot.message_handler(commands=['addCredit'])
+def add_credit_command(message):
+    msg = bot.reply_to(message, "Please send the new Stability API key.")
+    bot.register_next_step_handler(msg, save_user_stability_api_key)
+
+
+def save_user_stability_api_key(message):
+    chat_id = message.chat.id
+    new_key = message.text.strip()
+    if not new_key:
+        bot.reply_to(message, "❌ Invalid API key. Please try again.")
+        return
+
+    file_name = f"{chat_id}_stabilityapis.txt"
+    with open(file_name, "a") as file:
+        file.write(new_key + "\n")
+
+    bot.reply_to(message, "✅ New Stability API key added successfully!")
+
+    # Reinitialize the STABILITY_API_KEY with the updated file
+    get_user_stability_credits(chat_id)
+
+
+@bot.message_handler(commands=['credits'])
+def credits_command(message):
+    chat_id = message.chat.id
+    bot.send_chat_action(chat_id, 'typing')
+    total_credits = get_user_stability_credits(chat_id)
+    bot.reply_to(message, f"💳 *Total Stability AI Balance:* `{total_credits}` credits", parse_mode="MarkdownV2")
+
+# ==== GEMINI FUNCTIONS ====
+def get_user_gemini_key(chat_id):
+    file_name = f"{chat_id}_geminiapis.txt"
+    if not os.path.exists(file_name):
+        return None
+
+    with open(file_name, "r") as file:
+        keys = file.readlines()
+
+    return keys[0].strip() if keys else None
+
+
+@bot.message_handler(commands=['addGeminiKey'])
+def add_gemini_key_command(message):
+    msg = bot.reply_to(message, "Please send the new Gemini API key.")
+    bot.register_next_step_handler(msg, save_user_gemini_api_key)
+
+
+def save_user_gemini_api_key(message):
+    chat_id = message.chat.id
+    new_key = message.text.strip()
+    if not new_key:
+        bot.reply_to(message, "❌ Invalid API key. Please try again.")
+        return
+
+    file_name = f"{chat_id}_geminiapis.txt"
+    with open(file_name, "w") as file:  # Overwrite with the new key
+        file.write(new_key + "\n")
+
+    bot.reply_to(message, "✅ New Gemini API key added successfully!")
+
+
+def ask_gemini(prompt, chat_id):
+    gemini_key = get_user_gemini_key(chat_id)
+    if not gemini_key:
+        return "❌ No Gemini API key found. Please add one using /addGeminiKey."
+
+    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_key}"
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    try:
+        res = requests.post(gemini_url, headers={"Content-Type": "application/json"}, json=payload)
+        res.raise_for_status()
+        raw_text = res.json()['candidates'][0]['content']['parts'][0]['text']
+        return raw_text
+    except Exception as e:
+        return escape_markdown(f"❌ Gemini error: {str(e)}")
 
 # ==== TELEGRAM HANDLERS ====
 @bot.message_handler(commands=['start', 'help'])
@@ -136,54 +242,57 @@ def welcome(message):
         "🖼️ Image: /imagine A cat playing guitar\n"
         "🎬 Video from Image: Send an image, then type /videofy\n"
         "🎧 Text to Audio: /text2audio 20 Calm ambient music\n"
-        "💳 Check Credits: /credits\n\n"
+        "💳 Check Credits: /credits\n"
+        "➕ Add Credit: /addCredit\n"
+        "🔑 Add Gemini Key: /addGeminiKey\n\n"
         "Need help? Just ask!"), parse_mode="MarkdownV2")
+
 
 @bot.message_handler(commands=['imagine'])
 def image_command(message):
+    chat_id = message.chat.id
     prompt = message.text.replace("/imagine", "").strip()
     if not prompt:
         bot.reply_to(message, "Please provide a prompt. Example:\n/imagine A futuristic cityscape at sunset")
         return
-    bot.send_chat_action(message.chat.id, 'upload_photo')
+    bot.send_chat_action(chat_id, 'upload_photo')
     bot.reply_to(message, f"🎨 Generating image for: *{escape_markdown(prompt)}*", parse_mode="MarkdownV2")
-    file_path = generate_image(prompt)
+    file_path = generate_image(prompt, chat_id)
     if file_path:
         with open(file_path, "rb") as img_file:
-            bot.send_photo(message.chat.id, img_file)
+            bot.send_photo(chat_id, img_file)
+        os.remove(file_path)  # Delete the file after sending
     else:
         bot.reply_to(message, "❌ Failed to generate image. Please try again later.")
 
-@bot.message_handler(commands=['credits'])
-def credits_command(message):
-    bot.send_chat_action(message.chat.id, 'typing')
-    credits = get_stability_credits()
-    if credits is not None:
-        bot.reply_to(message, f"💳 *Stability AI Balance:* `{credits}` credits", parse_mode="MarkdownV2")
-    else:
-        bot.reply_to(message, "⚠️ Failed to retrieve Stability AI credit balance.")
 
 @bot.message_handler(content_types=['photo'])
 def handle_image(message):
-    bot.send_chat_action(message.chat.id, 'upload_video')
+    chat_id = message.chat.id
+    bot.send_chat_action(chat_id, 'upload_video')
     file_info = bot.get_file(message.photo[-1].file_id)
     downloaded_file = bot.download_file(file_info.file_path)
-    with open("input_image.jpg", 'wb') as new_file:
+    input_image_path = f"{chat_id}_input_image.jpg"
+    with open(input_image_path, 'wb') as new_file:
         new_file.write(downloaded_file)
     msg = bot.reply_to(message, "🎬 Starting video generation from image...")
-    generation_id = send_image_for_video("input_image.jpg")
+    generation_id = send_image_for_video(input_image_path, chat_id)
+    os.remove(input_image_path)  # Delete the input image after processing
     if generation_id:
-        video_path = get_video_result(generation_id, msg, message.chat.id)
+        video_path = get_video_result(generation_id, msg, chat_id)
         if video_path:
             with open(video_path, 'rb') as video_file:
-                bot.send_video(message.chat.id, video_file, caption="🎉 Here's your generated video!")
+                bot.send_video(chat_id, video_file, caption="🎉 Here's your generated video!")
+            os.remove(video_path)  # Delete the video after sending
         else:
-            bot.send_message(message.chat.id, "❌ Failed to generate video.")
+            bot.send_message(chat_id, "❌ Failed to generate video.")
     else:
-        bot.send_message(message.chat.id, "❌ Couldn't start video generation.")
+        bot.send_message(chat_id, "❌ Couldn't start video generation.")
+
 
 @bot.message_handler(commands=['text2audio'])
 def text_to_audio(message):
+    chat_id = message.chat.id
     parts = message.text.split(maxsplit=2)
     if len(parts) < 2:
         bot.reply_to(message, "❗ Please provide a prompt. Example:\n`/text2audio 30 cheerful acoustic music`", parse_mode="MarkdownV2")
@@ -197,21 +306,24 @@ def text_to_audio(message):
     if not prompt:
         bot.reply_to(message, "❗ Missing audio prompt. Please try again.", parse_mode="MarkdownV2")
         return
-    bot.send_chat_action(message.chat.id, 'record_audio')
+    bot.send_chat_action(chat_id, 'record_audio')
     bot.reply_to(message, f"🎧 Generating {duration}s audio:\n\n`{escape_markdown(prompt)}`", parse_mode="MarkdownV2")
-    audio_path = generate_audio(prompt, duration)
+    audio_path = generate_audio(prompt, duration, chat_id)
     if audio_path:
         with open(audio_path, 'rb') as audio_file:
-            bot.send_audio(message.chat.id, audio_file, caption=f"🎶 Here's your {duration}s audio!")
+            bot.send_audio(chat_id, audio_file, caption=f"🎶 Here's your {duration}s audio!")
+        os.remove(audio_path)  # Delete the audio file after sending
     else:
-        bot.send_message(message.chat.id, "❌ Failed to generate audio. Please try again later.")
+        bot.send_message(chat_id, "❌ Failed to generate audio. Please try again later.")
+
 
 @bot.message_handler(func=lambda message: True)
 def handle_text(message):
+    chat_id = message.chat.id
     user_input = message.text
-    bot.send_chat_action(message.chat.id, 'typing')
-    reply = ask_gemini(user_input)
-    send_long_message(message.chat.id, reply)
+    bot.send_chat_action(chat_id, 'typing')
+    reply = ask_gemini(user_input, chat_id)
+    send_long_message(chat_id, reply)
 
 # ==== START ====
 print("🤖 Bot is live with Gemini & Stability AI...")
