@@ -6,7 +6,7 @@ import re
 import os
 
 # ==== CONFIGURATION ====
-TELEGRAM_BOT_TOKEN = '7323819110:AAERJSFKN6dzWIXioeErIrHSkQ1WvaIAVts'
+TELEGRAM_BOT_TOKEN = ''
 GEMINI_API_KEY = ''
 STABILITY_API_KEY = ''
 
@@ -47,6 +47,24 @@ def send_long_message(chat_id, text):
         bot.send_message(chat_id, text[i:i + MAX_MESSAGE_LENGTH])
 
 # ==== STABILITY FUNCTIONS ====
+def validate_stability_api_key(api_key):
+    """Validate a Stability API key by making a test request."""
+    url = "https://api.stability.ai/v1/user/balance"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            return True  # Key is valid
+        elif response.status_code == 401:
+            return False  # Key is invalid
+        else:
+            print(f"Unexpected response while validating Stability API key: {response.status_code}")
+            return None  # Other errors (e.g., network issues)
+    except Exception as e:
+        print(f"Error validating Stability API key: {e}")
+        return None  # Network or other errors
+
+
 def generate_image(prompt, chat_id):
     url = "https://api.stability.ai/v2beta/stable-image/generate/ultra"
     headers = {
@@ -173,10 +191,19 @@ def save_user_stability_api_key(message):
     with open(file_name, "a") as file:
         file.write(new_key + "\n")
 
-    bot.reply_to(message, "✅ New Stability API key added successfully!")
-
-    # Reinitialize the STABILITY_API_KEY with the updated file
-    get_user_stability_credits(chat_id)
+    # Validate the new key
+    is_valid = validate_stability_api_key(new_key)
+    if is_valid is True:
+        bot.reply_to(message, "✅ New Stability API key added successfully!")
+    elif is_valid is False:
+        # Remove the invalid key
+        with open(file_name, "r") as file:
+            keys = file.readlines()
+        with open(file_name, "w") as file:
+            file.writelines([key for key in keys if key.strip() != new_key])
+        bot.reply_to(message, "❌ Invalid Stability API key. Please try again.")
+    else:
+        bot.reply_to(message, "⚠️ Could not validate the API key due to a network issue. Please try again later.")
 
 
 @bot.message_handler(commands=['credits'])
@@ -186,23 +213,36 @@ def credits_command(message):
     total_credits = get_user_stability_credits(chat_id)
     bot.reply_to(message, f"💳 *Total Stability AI Balance:* `{total_credits}` credits", parse_mode="MarkdownV2")
 
+
 # ==== GEMINI FUNCTIONS ====
+def validate_gemini_api_key(api_key):
+    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    payload = {"contents": [{"parts": [{"text": "Test"}]}]}
+    try:
+        response = requests.post(gemini_url, headers={"Content-Type": "application/json"}, json=payload)
+        if response.status_code == 200:
+            return True
+        elif response.status_code == 401:
+            return False
+        else:
+            print(f"Unexpected response: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"Error validating Gemini API key: {e}")
+        return None
+
 def get_user_gemini_key(chat_id):
     file_name = f"{chat_id}_geminiapis.txt"
     if not os.path.exists(file_name):
         return None
-
     with open(file_name, "r") as file:
         keys = file.readlines()
-
     return keys[0].strip() if keys else None
-
 
 @bot.message_handler(commands=['addGeminiKey'])
 def add_gemini_key_command(message):
     msg = bot.reply_to(message, "Please send the new Gemini API key.")
     bot.register_next_step_handler(msg, save_user_gemini_api_key)
-
 
 def save_user_gemini_api_key(message):
     chat_id = message.chat.id
@@ -210,28 +250,45 @@ def save_user_gemini_api_key(message):
     if not new_key:
         bot.reply_to(message, "❌ Invalid API key. Please try again.")
         return
-
     file_name = f"{chat_id}_geminiapis.txt"
-    with open(file_name, "w") as file:  # Overwrite with the new key
+    with open(file_name, "w") as file:
         file.write(new_key + "\n")
+    is_valid = validate_gemini_api_key(new_key)
+    if is_valid is True:
+        bot.reply_to(message, "✅ New Gemini API key added successfully!")
+    elif is_valid is False:
+        os.remove(file_name)
+        bot.reply_to(message, "❌ Invalid Gemini API key. Please try again.")
+    else:
+        bot.reply_to(message, "⚠️ Could not validate the API key due to a network issue. Please try again later.")
 
-    bot.reply_to(message, "✅ New Gemini API key added successfully!")
-
+def clean_html_response(html_code):
+    # Remove starting ```html and ending ```
+    if html_code.strip().startswith("```html"):
+        html_code = html_code.strip()[7:]  # remove ```html (7 chars)
+    if html_code.strip().endswith("```"):
+        html_code = html_code.strip()[:-3]  # remove ending ```
+    return html_code.strip()
 
 def ask_gemini(prompt, chat_id):
     gemini_key = get_user_gemini_key(chat_id)
     if not gemini_key:
-        return "❌ No Gemini API key found. Please add one using /addGeminiKey."
-
+        return None, "❌ No Gemini API key found. Please add one using /addGeminiKey."
     gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={gemini_key}"
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    full_prompt = ("Respond in pure HTML format, professionally styled with modern CSS animations with required images and srouces from web embedded beautifully like mordern websites,\
+    light/dark mode toggle button beautifully designed, fully responsive layout for mobile and desktop, and an attractive UI. \
+    Only output the final HTML code without backticks or markdown blocks. User query: " + prompt)
+    payload = {"contents": [{"parts": [{"text": full_prompt}]}]}
     try:
         res = requests.post(gemini_url, headers={"Content-Type": "application/json"}, json=payload)
+        if res.status_code == 401:
+            return None, "❌ Invalid Gemini API key. Please update it using /addGeminiKey."
         res.raise_for_status()
         raw_text = res.json()['candidates'][0]['content']['parts'][0]['text']
-        return raw_text
+        clean_html = clean_html_response(raw_text)
+        return clean_html, None
     except Exception as e:
-        return escape_markdown(f"❌ Gemini error: {str(e)}")
+        return None, f"❌ Gemini error: {str(e)}"
 
 # ==== TELEGRAM HANDLERS ====
 @bot.message_handler(commands=['start', 'help'])
@@ -322,8 +379,22 @@ def handle_text(message):
     chat_id = message.chat.id
     user_input = message.text
     bot.send_chat_action(chat_id, 'typing')
-    reply = ask_gemini(user_input, chat_id)
-    send_long_message(chat_id, reply)
+    html_content, error_msg = ask_gemini(user_input, chat_id)
+    if error_msg:
+        bot.reply_to(message, error_msg)
+        return
+    if not html_content:
+        bot.reply_to(message, "❌ Failed to generate HTML content.")
+        return
+    dir_name = f"user_{chat_id}"
+    os.makedirs(dir_name, exist_ok=True)
+    file_path = os.path.join(dir_name, f"{user_input}.html")
+    with open(file_path, "w", encoding="utf-8") as html_file:
+        html_file.write(html_content)
+    with open(file_path, "rb") as doc:
+        bot.send_document(chat_id, doc, caption="🌐 Here's your HTML response! 💾")
+    os.remove(file_path)
+    os.rmdir(dir_name)
 
 # ==== START ====
 print("🤖 Bot is live with Gemini & Stability AI...")
